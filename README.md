@@ -1,6 +1,6 @@
 # Go API Starter
 
-A small REST API for managing items, built with Go's standard library.
+A small REST API for managing items, built with Go and a local SQLite database.
 
 ## Run locally
 
@@ -10,7 +10,13 @@ Requires Go 1.27 or newer.
 go run .
 ```
 
-The server listens on `:8080`. Data is kept in memory and resets when the process stops.
+The server listens on `:8080`. SQLite is embedded; no Docker or external database is needed. The database file defaults to `data.db` in the current directory. Set `DATABASE_PATH` to choose another file:
+
+```sh
+DATABASE_PATH=./data/items.db go run .
+```
+
+The application creates the parent directory and applies versioned migrations at startup. Database files and SQLite sidecar files are excluded from Git.
 
 ## API
 
@@ -26,7 +32,7 @@ Names must not be empty. Unknown IDs return `404`; malformed IDs and invalid inp
 
 ## Architecture
 
-The HTTP handlers use a concurrency-safe in-memory store. Keeping persistence out of this first vertical slice makes the API runnable without external services; a later issue can add a database and migrations.
+The HTTP handlers use `database/sql` with the pure-Go `modernc.org/sqlite` driver. A schema migration table records applied versions, and the initial migration creates the items table without replacing existing data.
 
 ## Verify
 
