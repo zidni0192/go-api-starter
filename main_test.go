@@ -2,14 +2,17 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"testing"
 )
 
 func TestItemCRUD(t *testing.T) {
-	h := newStore().handler()
+	s := testStore(t, filepath.Join(t.TempDir(), "items.db"))
+	h := s.handler()
 	request := func(method, path, body string) *httptest.ResponseRecorder {
 		t.Helper()
 		r := httptest.NewRequest(method, path, bytes.NewBufferString(body))
@@ -39,8 +42,63 @@ func TestItemCRUD(t *testing.T) {
 
 func TestCreateRejectsEmptyName(t *testing.T) {
 	w := httptest.NewRecorder()
-	newStore().handler().ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/items", bytes.NewBufferString(`{"name":" "}`)))
+	s := testStore(t, filepath.Join(t.TempDir(), "items.db"))
+	s.handler().ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/items", bytes.NewBufferString(`{"name":" "}`)))
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want %d", w.Code, http.StatusBadRequest)
 	}
+}
+
+func TestStorePersistsAcrossReopenAndMigrationIsIdempotent(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "nested", "items.db")
+	s := testStore(t, path)
+	response := httptest.NewRecorder()
+	s.handler().ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/items", bytes.NewBufferString(`{"name":"saved"}`)))
+	if response.Code != http.StatusCreated {
+		t.Fatalf("create status = %d, body = %s", response.Code, response.Body)
+	}
+	if err := s.close(); err != nil {
+		t.Fatal(err)
+	}
+
+	reopened, err := openStore(context.Background(), path)
+	if err != nil {
+		t.Fatalf("reopen store: %v", err)
+	}
+	t.Cleanup(func() { reopened.close() })
+	// Re-running startup migration must retain existing rows.
+	if err := migrate(context.Background(), reopened.db); err != nil {
+		t.Fatalf("rerun migration: %v", err)
+	}
+	response = httptest.NewRecorder()
+	reopened.handler().ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/items", nil))
+	var items []item
+	if err := json.Unmarshal(response.Body.Bytes(), &items); err != nil || len(items) != 1 || items[0].Name != "saved" {
+		t.Fatalf("persisted list = %s, err = %v", response.Body, err)
+	}
+}
+
+func TestMissingIDsReturnNotFound(t *testing.T) {
+	s := testStore(t, filepath.Join(t.TempDir(), "items.db"))
+	for _, request := range []struct{ method, path, body string }{
+		{http.MethodGet, "/items/404", ""},
+		{http.MethodPut, "/items/404", `{"name":"absent"}`},
+		{http.MethodDelete, "/items/404", ""},
+	} {
+		w := httptest.NewRecorder()
+		s.handler().ServeHTTP(w, httptest.NewRequest(request.method, request.path, bytes.NewBufferString(request.body)))
+		if w.Code != http.StatusNotFound {
+			t.Errorf("%s %s status = %d, want %d", request.method, request.path, w.Code, http.StatusNotFound)
+		}
+	}
+}
+
+func testStore(t *testing.T, path string) *store {
+	t.Helper()
+	s, err := openStore(context.Background(), path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { s.close() })
+	return s
 }
